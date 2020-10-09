@@ -141,7 +141,7 @@ def run(context):
     if postprocessing in ["EPFL", "ALL"]:
         context.set_progress(message='Processing density map (EPFL)')
         volume_folder = "/root/vol_epfl"
-        output_zip_file_path = "/root/TrackyMcTrackface_EPFL_example.zip"
+        output_epfl_zip_file_path = "/root/TrackyMcTrackface_EPFL_example.zip"
         os.mkdir(volume_folder)
         lengths = length(streamlines)
         streamlines = streamlines[lengths > 1]
@@ -158,12 +158,12 @@ def run(context):
                                         "vol" + nbr + "_t" + str(t) + ".nii.gz")
             nib.Nifti1Image(mask.astype("int32"), affine,
                             seed_mask_img.header).to_filename(vol_filename)
-        shutil.make_archive(output_zip_file_path[:-4], 'zip', volume_folder)
+        shutil.make_archive(output_epfl_zip_file_path[:-4], 'zip', volume_folder)
 
     if postprocessing in ["VUMC", "ALL"]:
         context.set_progress(message='Processing density map (VUMC)')
         volume_folder = "/root/vol_vumc"
-        output_zip_file_path = "/root/TrackyMcTrackface_VUMC_example.zip"
+        output_vumc_zip_file_path = "/root/TrackyMcTrackface_VUMC_example.zip"
         os.mkdir(volume_folder)
         lengths = length(streamlines)
         streamlines = streamlines[lengths > 1]
@@ -188,7 +188,7 @@ def run(context):
                                         "vol" + nbr + "_t" + str(t) + ".nii.gz")
             nib.Nifti1Image(mask.astype("int32"), affine,
                             seed_mask_img.header).to_filename(vol_filename)
-        shutil.make_archive(output_zip_file_path[:-4], 'zip', volume_folder)
+        shutil.make_archive(output_vumc_zip_file_path[:-4], 'zip', volume_folder)
 
     ###################
     # Upload the data #
@@ -198,6 +198,8 @@ def run(context):
     # context.upload_file(fod_file_path, 'fod.nii.gz')
     # context.upload_file(streamlines_file_path, 'streamlines.trk')
     if postprocessing in ["EPFL", "ALL"]:
-        context.upload_file(output_zip_file_path, 'TrackyMcTrackface_EPFL_example.zip')
+        context.upload_file(output_epfl_zip_file_path,
+                            'TrackyMcTrackface_EPFL_example.zip')
     if postprocessing in ["VUMC", "ALL"]:
-        context.upload_file(output_zip_file_path, 'TrackyMcTrackface_VUMC_example.zip')
+        context.upload_file(output_vumc_zip_file_path,
+                            'TrackyMcTrackface_VUMC_example.zip')
