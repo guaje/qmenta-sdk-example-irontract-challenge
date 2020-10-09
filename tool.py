@@ -30,7 +30,6 @@ def run(context):
     analysis_data = context.fetch_analysis_data()
     settings = analysis_data['settings']
     postprocessing = settings['postprocessing']
-    print(postprocessing)
 
     hcpl_dwi_file_handle = context.get_files('input', modality='HARDI')[0]
     hcpl_dwi_file_path = hcpl_dwi_file_handle.download('/root/')

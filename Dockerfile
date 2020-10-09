@@ -16,5 +16,5 @@ RUN echo '#!/bin/bash\nxvfb-run -a --server-args="-screen 0, 1024x768x24" /usr/b
 COPY tool.py report_template.html qmenta_logo.png /root/
 
 
-# install the DIPY package
+# Install the DIPY package
 RUN pip install dipy
