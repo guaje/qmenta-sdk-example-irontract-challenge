@@ -1,4 +1,4 @@
-# QMENTA SDK Tool Example for the IronTract Challenge
+# QMENTA SDK Tool Example for the IronTract Challenge Round II
 Repository cloned from [QMENTA SDK Example](https://github.com/qmentasdk/qmenta-sdk-example).
 
 Reconstruction and tracking code from [DIPY](http://dipy.org).
