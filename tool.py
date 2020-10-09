@@ -1,81 +1,204 @@
-import matplotlib
-
-# This backend config avoids $DISPLAY errors in headless machines
-matplotlib.use('Agg')
-
-import matplotlib.pyplot as plt
+import nibabel as nib
 import numpy as np
-import pdfkit
-from subprocess import call
-from time import gmtime, strftime
-from tornado import template
+import os
+import scipy.ndimage.morphology
+import shutil
+
+from dipy.core.gradients import gradient_table
+from dipy.data import get_sphere
+from dipy.direction import ProbabilisticDirectionGetter
+from dipy.io.gradients import read_bvals_bvecs
+from dipy.io.stateful_tractogram import Space, StatefulTractogram
+from dipy.io.streamline import save_trk
+from dipy.reconst.csdeconv import (ConstrainedSphericalDeconvModel,
+                                   auto_response_ssst)
+from dipy.reconst.dti import TensorModel, fractional_anisotropy
+from dipy.segment.mask import median_otsu
+from dipy.tracking import utils
+from dipy.tracking.local_tracking import LocalTracking
+from dipy.tracking.streamline import Streamlines
+from dipy.tracking.stopping_criterion import ThresholdStoppingCriterion
+from dipy.tracking.streamlinespeed import length
+
 
 # AnalysisContext documentation: https://docs.qmenta.com/sdk/sdk.html
 def run(context):
-    
-    # Get the analysis information dictionary (patient id, analysis name...)
+
+    ####################################################
+    # Get the path to input files  and other parameter #
+    ####################################################
     analysis_data = context.fetch_analysis_data()
-
-    # Get the analysis settings (histogram range of intensities)
     settings = analysis_data['settings']
+    postprocessing = settings['postprocessing']
+    print(postprocessing)
 
-    # Get a T1 image from the input files
-    t1_file_handler = context.get_files('input', modality='T1')[0]
-    t1_path = t1_file_handler.download('/root/')  # Download and automatically unpack  
+    hcpl_dwi_file_handle = context.get_files('input', modality='HARDI')[0]
+    hcpl_dwi_file_path = hcpl_dwi_file_handle.download('/root/')
 
-    # Compute a basic histogram with MRtrix
-    context.set_progress(message='Processing...')
+    hcpl_bvalues_file_handle = context.get_files(
+        'input', reg_expression='.*prep.bvalues.hcpl.txt')[0]
+    hcpl_bvalues_file_path = hcpl_bvalues_file_handle.download('/root/')
+    hcpl_bvecs_file_handle = context.get_files(
+        'input', reg_expression='.*prep.gradients.hcpl.txt')[0]
+    hcpl_bvecs_file_path = hcpl_bvecs_file_handle.download('/root/')
 
-    histogram_data_path = '/root/hist.txt'
-    call([
-        "/usr/lib/mrtrix/bin/mrstats", 
-        "-histogram", histogram_data_path,
-        "-bins", "50",
-        t1_path
-    ])
+    dwi_file_handle = context.get_files('input', modality='DSI')[0]
+    dwi_file_path = dwi_file_handle.download('/root/')
+    bvalues_file_handle = context.get_files(
+        'input', reg_expression='.*prep.bvalues.txt')[0]
+    bvalues_file_path = bvalues_file_handle.download('/root/')
+    bvecs_file_handle = context.get_files(
+        'input', reg_expression='.*prep.gradients.txt')[0]
+    bvecs_file_path = bvecs_file_handle.download('/root/')
 
-    # Plot the histogram for the selected range of intensities
-    hist_start = settings['hist_start']
-    hist_end = settings['hist_end']
-    [bins_centers, values] = np.loadtxt(histogram_data_path)
+    inject_file_handle = context.get_files(
+        'input', reg_expression='.*prep.inject.nii.gz')[0]
+    inject_file_path = inject_file_handle.download('/root/')
 
-    fig, ax = plt.subplots()
-    ax.set_title('T1 Histogram (for intensities between 50 and 400)')
-    ax.set_ylabel('Number of voxels')
-    ax.grid(color='#CCCCCC', linestyle='--', linewidth=1)
 
-    left_i = next(i for i,v in enumerate(bins_centers) if v > hist_start)
-    right_i = max((i for i,v in enumerate(bins_centers) if v < hist_end))
+    VUMC_ROIs_file_handle = context.get_files(
+        'input', reg_expression='.*VUMC_ROIs.nii.gz')[0]
+    VUMC_ROIs_file_path = inject_file_handle.download('/root/')
 
-    plt.plot(bins_centers[left_i:right_i], values[left_i:right_i])
+    ###############################
+    # _____ _____ _______     __  #
+    # |  __ \_   _|  __ \ \   / / #
+    # | |  | || | | |__) \ \_/ /  #
+    # | |  | || | |  ___/ \   /   #
+    # | |__| || |_| |      | |    #
+    # |_____/_____|_|      |_|    #
+    #                             #
+    # dipy.org/documentation      #
+    ###############################
+    #       IronTract Team        #
+    #      TrackyMcTrackface      #
+    ################################
 
-    hist_path = '/root/hist.png'
-    plt.savefig(hist_path)
+    #################
+    # Load the data #
+    #################
+    dwi_img = nib.load(hcpl_dwi_file_path)
+    bvals, bvecs = read_bvals_bvecs(hcpl_bvalues_file_path,
+                                    hcpl_bvecs_file_path)
+    gtab = gradient_table(bvals, bvecs)
+    ROIs_img = nib.load(VUMC_ROIs_file_path)
 
-    # Generate an example report
-    # Since it is a head-less machine, it requires Xvfb to generate the pdf
-    context.set_progress(message='Creating report...')
+    ############################################
+    # Extract the brain mask from the b0 image #
+    ############################################
+    _, brain_mask = median_otsu(dwi_img.get_data()[:, :, :, 0],
+                                median_radius=2, numpass=1)
 
-    report_path = '/root/report.pdf'
+    ##################################################################
+    # Fit the tensor model and compute the fractional anisotropy map #
+    ##################################################################
+    context.set_progress(message='Processing voxel-wise DTI metrics.')
+    tenmodel = TensorModel(gtab)
+    tenfit = tenmodel.fit(dwi_img.get_data(), mask=brain_mask)
+    FA = fractional_anisotropy(tenfit.evals)
+    # fa_file_path = "/root/fa.nii.gz"
+    # nib.Nifti1Image(FA,dwi_img.affine).to_filename(fa_file_path)
 
-    data_report = {
-        'logo_main': '/root/qmenta_logo.png',
-        'ss': analysis_data['patient_secret_name'],
-        'ssid': analysis_data['ssid'],
-        'histogram': hist_path,
-        'this_moment': strftime("%Y-%m-%d %H:%M:%S", gmtime()),
-        'version': 1.0
-    }
+    ################################################
+    # Compute Fiber Orientation Distribution (CSD) #
+    ################################################
+    context.set_progress(message='Processing voxel-wise FOD estimation.')
+    response, ratio = auto_response_ssst(
+        gtab, dwi_img.get_data(), roi_radii=10, fa_thr=0.7)
+    csd_model = ConstrainedSphericalDeconvModel(gtab, response, sh_order=6)
+    csd_fit = csd_model.fit(dwi_img.get_data(), mask=brain_mask)
+    # fod_file_path = "/root/fod.nii.gz"
+    # nib.Nifti1Image(csd_fit.shm_coeff,dwi_img.affine).to_filename(fod_file_path)
 
-    loader = template.Loader('/root/')
-    report_contents = loader.load('report_template.html').generate(data_report=data_report)
+    ###########################################
+    # Compute DIPY Probabilistic Tractography #
+    ###########################################
+    context.set_progress(message='Processing tractography.')
+    sphere = get_sphere("repulsion724")
+    seed_mask_img = nib.load(inject_file_path)
+    affine = seed_mask_img.affine
+    seeds = utils.seeds_from_mask(seed_mask_img.get_data(), affine, density=5)
+    stopping_criterion = ThresholdStoppingCriterion(FA, 0.2)
+    prob_dg = ProbabilisticDirectionGetter.from_shcoeff(csd_fit.shm_coeff,
+                                                        max_angle=20.,
+                                                        sphere=sphere)
+    streamline_generator = LocalTracking(prob_dg, stopping_criterion, seeds,
+                                         affine, step_size=.2, max_cross=1)
+    streamlines = Streamlines(streamline_generator)
+    # sft = StatefulTractogram(streamlines, seed_mask_img, Space.RASMM)
+    # streamlines_file_path = "/root/streamlines.trk"
+    # save_trk(sft, streamlines_file_path)
 
-    if isinstance(report_contents, bytes):
-        report_contents = report_contents.decode("utf-8")
-    pdfkit.from_string(report_contents, report_path)
+    ###########################################################################
+    # Compute 3D volumes for the IronTract Challenge. For 'EPFL', we only     #
+    # keep streamlines with length > 1mm. We compute the visitation  count    #
+    # image and apply a small gaussian smoothing. The gaussian smoothing      #
+    # is especially usefull to increase voxel coverage of deterministic       #
+    # algorithms. The log of the smoothed visitation count map is then        #
+    # iteratively thresholded producing 200 volumes/operation points.         #
+    # For VUMC, additional streamline filtering is done using anatomical      #
+    # priors (keeping only streamlines that intersect with at least one ROI). #
+    ###########################################################################
+    if postprocessing in ["EPFL", "ALL"]:
+        context.set_progress(message='Processing density map (EPFL)')
+        volume_folder = "/root/vol_epfl"
+        output_zip_file_path = "/root/TrackyMcTrackface_EPFL_example.zip"
+        os.mkdir(volume_folder)
+        lengths = length(streamlines)
+        streamlines = streamlines[lengths > 1]
+        density = utils.density_map(streamlines, affine, seed_mask_img.shape)
+        density = scipy.ndimage.gaussian_filter(density.astype("float32"), 0.5)
 
-    # Upload the data and the report
+        log_density = np.log10(density + 1)
+        max_density = np.max(log_density)
+        for i, t in enumerate(np.arange(0, max_density, max_density / 200)):
+            nbr = str(i)
+            nbr = nbr.zfill(3)
+            mask = log_density >= t
+            vol_filename = os.path.join(volume_folder,
+                                        "vol" + nbr + "_t" + str(t) + ".nii.gz")
+            nib.Nifti1Image(mask.astype("int32"), affine,
+                            seed_mask_img.header).to_filename(vol_filename)
+        shutil.make_archive(output_zip_file_path[:-4], 'zip', volume_folder)
+
+    if postprocessing in ["VUMC", "ALL"]:
+        context.set_progress(message='Processing density map (VUMC)')
+        volume_folder = "/root/vol_vumc"
+        output_zip_file_path = "/root/TrackyMcTrackface_VUMC_example.zip"
+        os.mkdir(volume_folder)
+        lengths = length(streamlines)
+        streamlines = streamlines[lengths > 1]
+
+        rois = ROIs_img.get_fdata().astype(int)
+        _, grouping = utils.connectivity_matrix(streamlines, affine, rois,
+                                                inclusive=True,
+                                                return_mapping=True,
+                                                mapping_as_streamlines=False)
+        streamlines = streamlines[grouping[(0, 1)]]
+
+        density = utils.density_map(streamlines, affine, seed_mask_img.shape)
+        density = scipy.ndimage.gaussian_filter(density.astype("float32"), 0.5)
+
+        log_density = np.log10(density + 1)
+        max_density = np.max(log_density)
+        for i, t in enumerate(np.arange(0, max_density, max_density / 200)):
+            nbr = str(i)
+            nbr = nbr.zfill(3)
+            mask = log_density >= t
+            vol_filename = os.path.join(volume_folder,
+                                        "vol" + nbr + "_t" + str(t) + ".nii.gz")
+            nib.Nifti1Image(mask.astype("int32"), affine,
+                            seed_mask_img.header).to_filename(vol_filename)
+        shutil.make_archive(output_zip_file_path[:-4], 'zip', volume_folder)
+
+    ###################
+    # Upload the data #
+    ###################
     context.set_progress(message='Uploading results...')
-
-    context.upload_file(histogram_data_path, 'hist_data.txt')
-    context.upload_file(report_path, 'report.pdf')
+    # context.upload_file(fa_file_path, 'fa.nii.gz')
+    # context.upload_file(fod_file_path, 'fod.nii.gz')
+    # context.upload_file(streamlines_file_path, 'streamlines.trk')
+    if postprocessing in ["EPFL", "ALL"]:
+        context.upload_file(output_zip_file_path, 'TrackyMcTrackface_EPFL_example.zip')
+    if postprocessing in ["VUMC", "ALL"]:
+        context.upload_file(output_zip_file_path, 'TrackyMcTrackface_VUMC_example.zip')
