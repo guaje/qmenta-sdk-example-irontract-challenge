@@ -15,6 +15,5 @@ RUN echo '#!/bin/bash\nxvfb-run -a --server-args="-screen 0, 1024x768x24" /usr/b
 # Copy the source files (only this layer will have to be built after the first time)
 COPY tool.py report_template.html qmenta_logo.png /root/
 
-
 # Install the DIPY package
-RUN pip install dipy
+RUN pip install -U scipy cython nibabel h5py cvxpy dipy
